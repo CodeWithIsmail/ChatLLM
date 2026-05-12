@@ -1,0 +1,216 @@
+"use client";
+
+import ChatTopbar from "./chat-topbar";
+import ChatList from "./chat-list";
+import ChatBottombar from "./chat-bottombar";
+import { AIMessage, HumanMessage } from "@langchain/core/messages";
+import { BytesOutputParser } from "@langchain/core/output_parsers";
+import { Attachment, ChatRequestOptions, generateId } from "ai";
+import { Message, useChat } from "ai/react";
+import React, { useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
+import { v4 as uuidv4 } from "uuid";
+import useChatStore from "@/app/hooks/useChatStore";
+import useAuthStore from "@/app/hooks/useAuthStore";
+import { useRouter } from "next/navigation";
+import Image from "next/image";
+import WelcomeCard from "../welcome-card";
+
+export interface ChatProps {
+  id: string;
+  initialMessages: Message[] | [];
+  isMobile?: boolean;
+}
+
+export default function Chat({ initialMessages, id, isMobile }: ChatProps) {
+  const {
+    messages,
+    input,
+    handleInputChange,
+    handleSubmit,
+    isLoading,
+    stop,
+    setMessages,
+    setInput,
+    reload,
+  } = useChat({
+    id,
+    initialMessages,
+    onResponse: (response) => {
+      if (response) {
+        setLoadingSubmit(false);
+      }
+    },
+    onFinish: (message) => {
+      const savedMessages = getMessagesById(id);
+      const allMessages = [...savedMessages, message];
+      saveMessages(id, allMessages);
+      
+      // Save to database if user is authenticated
+      const { isAuthenticated } = useAuthStore.getState();
+      if (isAuthenticated) {
+        saveMessagesToDB(id, allMessages);
+      }
+      
+      setLoadingSubmit(false);
+      router.replace(`/c/${id}`);
+    },
+    onError: (error) => {
+      setLoadingSubmit(false);
+      router.replace("/");
+      console.error(error.message);
+      console.error(error.cause);
+    },
+  });
+  const [loadingSubmit, setLoadingSubmit] = React.useState(false);
+  const formRef = useRef<HTMLFormElement>(null);
+  const base64Images = useChatStore((state) => state.base64Images);
+  const setBase64Images = useChatStore((state) => state.setBase64Images);
+  const selectedModel = useChatStore((state) => state.selectedModel);
+  const saveMessages = useChatStore((state) => state.saveMessages);
+  const saveMessagesToDB = useChatStore((state) => state.saveMessagesToDB);
+  const getMessagesById = useChatStore((state) => state.getMessagesById);
+  const router = useRouter();
+
+  const onSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    window.history.replaceState({}, "", `/c/${id}`);
+
+    if (!selectedModel) {
+      toast.error("Please select a model");
+      return;
+    }
+
+    // Check if images are uploaded but model doesn't support vision
+    if (base64Images && base64Images.length > 0) {
+      const visionModels = ['llava', 'bakllava', 'llava-phi3', 'llava:latest', 'moondream'];
+      const isVisionModel = visionModels.some(model => 
+        selectedModel.toLowerCase().includes(model.toLowerCase())
+      );
+      
+      if (!isVisionModel) {
+        toast.error(`Model "${selectedModel}" doesn't support images. Please select a vision model like "llava".`);
+        return;
+      }
+    }
+
+    const attachments: Attachment[] = base64Images
+      ? base64Images.map((image) => ({
+          contentType: "image/base64",
+          url: image,
+        }))
+      : [];
+
+    const userMessage: Message = {
+      id: generateId(),
+      role: "user",
+      content: input,
+      ...(attachments.length > 0 && {
+        experimental_attachments: attachments,
+      }),
+    };
+
+    setLoadingSubmit(true);
+
+    const requestOptions: ChatRequestOptions = {
+      body: {
+        selectedModel: selectedModel,
+      },
+      ...(base64Images && {
+        data: {
+          images: base64Images,
+        },
+        experimental_attachments: attachments,
+      }),
+    };
+
+    // Clear images immediately after creating the message but before sending
+    setBase64Images(null);
+    
+    handleSubmit(e, requestOptions);
+    const allMessages = [...messages, userMessage];
+    saveMessages(id, allMessages);
+    
+    // Save to database if user is authenticated
+    const { isAuthenticated } = useAuthStore.getState();
+    if (isAuthenticated) {
+      saveMessagesToDB(id, allMessages);
+    }
+  };
+
+  const removeLatestMessage = () => {
+    const updatedMessages = messages.slice(0, -1);
+    setMessages(updatedMessages);
+    saveMessages(id, updatedMessages);
+    return updatedMessages;
+  };
+
+  const handleStop = () => {
+    stop();
+    saveMessages(id, [...messages]);
+    setLoadingSubmit(false);
+  };
+
+  return (
+    <div className="flex flex-col w-full h-full">
+      <ChatTopbar
+        isLoading={isLoading}
+        chatId={id}
+        messages={messages}
+        setMessages={setMessages}
+      />
+
+      {messages.length === 0 ? (
+        <div className="flex flex-col h-full w-full items-center gap-6 justify-center">
+          <Image
+            src="/ollama.png"
+            alt="AI"
+            width={40}
+            height={40}
+            className="h-16 w-14 object-contain dark:invert"
+          />
+          <p className="text-center text-base text-muted-foreground">
+            How can I help you today?
+          </p>
+          <WelcomeCard />
+          <ChatBottombar
+            input={input}
+            handleInputChange={handleInputChange}
+            handleSubmit={onSubmit}
+            isLoading={isLoading}
+            stop={handleStop}
+            setInput={setInput}
+          />
+        </div>
+      ) : (
+        <>
+          <ChatList
+            messages={messages}
+            isLoading={isLoading}
+            loadingSubmit={loadingSubmit}
+            reload={async () => {
+              removeLatestMessage();
+
+              const requestOptions: ChatRequestOptions = {
+                body: {
+                  selectedModel: selectedModel,
+                },
+              };
+
+              setLoadingSubmit(true);
+              return reload(requestOptions);
+            }}
+          />
+          <ChatBottombar
+            input={input}
+            handleInputChange={handleInputChange}
+            handleSubmit={onSubmit}
+            isLoading={isLoading}
+            stop={handleStop}
+            setInput={setInput}
+          />
+        </>
+      )}
+    </div>
+  );
+}
